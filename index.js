@@ -16,6 +16,32 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
+// // Twilio setup (replace with your credentials)
+// const accountSid = 'your_twilio_account_sid';
+// const authToken = 'your_twilio_auth_token';
+// const client = new twilio(accountSid, authToken);
+// const fromWhatsAppNumber = 'whatsapp:+14155238886';  // Twilio's sandbox number
+// const toWhatsAppNumber = 'whatsapp:+1234567890'; 
+
+
+// Handle status change from frontend
+// io.on('connection', (socket) => {
+//   socket.on('statusChange', (data) => {
+//     const { deviceName, ifDescr, status } = data;
+//     const message = `device name - ${deviceName} > interface description - ${ifDescr} is getting ${status}`;
+
+//     // Send WhatsApp message
+//     client.messages
+//       .create({
+//         body: message,
+//         from: fromWhatsAppNumber,
+//         to: toWhatsAppNumber,
+//       })
+//       .then((message) => console.log('WhatsApp message sent:', message.sid))
+//       .catch((error) => console.error('Error sending WhatsApp message:', error));
+//   });
+// });
+
 /* ================= MYSQL ================= */
 const db = mysql.createPool({
   host: "127.0.0.1",
@@ -29,6 +55,7 @@ const OIDS = {
   sysName: "1.3.6.1.2.1.1.5.0",
   ifDescr: "1.3.6.1.2.1.2.2.1.2",
   ifName: "1.3.6.1.2.1.31.1.1.1.1",
+  ifAlias: "1.3.6.1.2.1.31.1.1.1.18",  // Added for user-set description/alias
   ifType: "1.3.6.1.2.1.2.2.1.3",
   ifSpeed: "1.3.6.1.2.1.2.2.1.5",
   ifAdmin: "1.3.6.1.2.1.2.2.1.7",
@@ -146,10 +173,11 @@ async function pollDevice(device) {
       console.warn(`No CPU OID worked for ${device.ip_address}`);
     }
 
-    // Poll interface data
+    // Poll interface data (added ifAlias)
     const [
       descrs,
       names,
+      aliases,
       types,
       speeds,
       admins,
@@ -161,6 +189,7 @@ async function pollDevice(device) {
     ] = await Promise.all([
       snmpWalk(session, OIDS.ifDescr),
       snmpWalk(session, OIDS.ifName),
+      snmpWalk(session, OIDS.ifAlias),
       snmpWalk(session, OIDS.ifType),
       snmpWalk(session, OIDS.ifSpeed),
       snmpWalk(session, OIDS.ifAdmin),
@@ -181,6 +210,7 @@ async function pollDevice(device) {
 
     add(descrs, "ifDescr");
     add(names, "ifName");
+    add(aliases, "ifAlias");
     add(types, "ifType");
     add(speeds, "ifSpeed");
     add(admins, "ifAdminStatus");
@@ -195,11 +225,12 @@ async function pollDevice(device) {
 
       await db.query(
         `INSERT INTO interfaces
-        (device_id, ifIndex, ifDescr, ifName, ifType, ifSpeed, ifAdminStatus, ifOperStatus, ifInErrors, ifOutErrors, ifInDiscards, ifOutDiscards, last_polled)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+        (device_id, ifIndex, ifDescr, ifName, ifAlias, ifType, ifSpeed, ifAdminStatus, ifOperStatus, ifInErrors, ifOutErrors, ifInDiscards, ifOutDiscards, last_polled)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
         ON DUPLICATE KEY UPDATE
         ifDescr=VALUES(ifDescr),
         ifName=VALUES(ifName),
+        ifAlias=VALUES(ifAlias),
         ifType=VALUES(ifType),
         ifSpeed=VALUES(ifSpeed),
         ifAdminStatus=VALUES(ifAdminStatus),
@@ -214,6 +245,7 @@ async function pollDevice(device) {
           ifIndex,
           i.ifDescr?.toString() || "",
           i.ifName?.toString() || "",
+          i.ifAlias?.toString() || "",
           i.ifType || 0,
           i.ifSpeed || 0,
           i.ifAdminStatus || 0,
