@@ -16,32 +16,6 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// // Twilio setup (replace with your credentials)
-// const accountSid = 'your_twilio_account_sid';
-// const authToken = 'your_twilio_auth_token';
-// const client = new twilio(accountSid, authToken);
-// const fromWhatsAppNumber = 'whatsapp:+14155238886';  // Twilio's sandbox number
-// const toWhatsAppNumber = 'whatsapp:+1234567890'; 
-
-
-// Handle status change from frontend
-// io.on('connection', (socket) => {
-//   socket.on('statusChange', (data) => {
-//     const { deviceName, ifDescr, status } = data;
-//     const message = `device name - ${deviceName} > interface description - ${ifDescr} is getting ${status}`;
-
-//     // Send WhatsApp message
-//     client.messages
-//       .create({
-//         body: message,
-//         from: fromWhatsAppNumber,
-//         to: toWhatsAppNumber,
-//       })
-//       .then((message) => console.log('WhatsApp message sent:', message.sid))
-//       .catch((error) => console.error('Error sending WhatsApp message:', error));
-//   });
-// });
-
 /* ================= MYSQL ================= */
 const db = mysql.createPool({
   host: "127.0.0.1",
