@@ -16,6 +16,7 @@
     "mysql2": "^3.16.1",
     "net-snmp": "^3.26.0",
     "node-sflow": "^0.0.6",
+    "node-telegram-bot-api": "^0.67.0",
     "ping": "^0.4.4",
     "sflow": "^1.27.0",
     "socket.io": "^4.8.3",

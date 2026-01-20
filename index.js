@@ -6,6 +6,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const ping = require("ping");
 const { config } = require("dotenv");
+const TelegramBot = require('node-telegram-bot-api');  // New: For Telegram
 
 config();
 
@@ -45,6 +46,17 @@ const OIDS = {
 /* ================= STATE ================= */
 const lastCounters = {};
 const liveTraffic = {};
+const previousStatuses = {};  // New: Track previous port statuses for change detection
+
+/* ================= TELEGRAM SETUP ================= */
+const botToken = process.env.TELEGRAM_BOT_TOKEN;
+const chatId = process.env.TELEGRAM_CHAT_ID;
+let bot;
+if (botToken) {
+  bot = new TelegramBot(botToken, { polling: false });
+} else {
+  console.warn('Telegram bot token not set. Notifications disabled.');
+}
 
 /* ================= SAFE SNMP GET ================= */
 function snmpGet(session, oid) {
@@ -104,6 +116,11 @@ async function pollDevice(device) {
         if (!liveTraffic[device.id]) liveTraffic[device.id] = {};
         liveTraffic[device.id][iface.ifIndex] = { status: 2 }; // DOWN
       });
+      // New: Send Telegram alert for unreachable device
+      if (bot) {
+        const alertMessage = `Alert: Device ${device.hostname || device.ip_address} (${device.ip_address}) is unreachable. All ports set to DOWN.`;
+        bot.sendMessage(chatId, alertMessage).catch(err => console.error('Telegram send failed:', err));
+      }
       console.log(`Device ${device.ip_address} unreachable: All ports set to DOWN`);
       return;
     }
@@ -117,6 +134,7 @@ async function pollDevice(device) {
 
     if (!lastCounters[device.id]) lastCounters[device.id] = {};
     if (!liveTraffic[device.id]) liveTraffic[device.id] = {};
+    if (!previousStatuses[device.id]) previousStatuses[device.id] = {};  // New: Init previous statuses
 
     // Poll sysName and update hostname
     const sysName = await snmpGet(session, OIDS.sysName);
@@ -274,6 +292,18 @@ async function pollDevice(device) {
       const idx = Number(v.oid.split(".").pop());
       const status = Number(v.value); // 1 = UP, 2 = DOWN
       liveTraffic[device.id][idx] = { ...liveTraffic[device.id][idx], status };
+
+      // New: Check for status change and send Telegram alert
+      const prevStatus = previousStatuses[device.id][idx];
+      if (prevStatus !== undefined && prevStatus !== status && bot) {
+        const statusText = status === 1 ? 'UP' : 'DOWN';
+        const portName = map[idx]?.ifDescr?.toString() || idx;  // Use ifDescr if available, else idx
+        const alertMessage = `Alert: Port ${portName} on Device ${device.hostname || device.ip_address} is now ${statusText}`;
+        bot.sendMessage(chatId, alertMessage).catch(err => console.error('Telegram send failed:', err));
+      }
+      // New: Update previous status
+      previousStatuses[device.id][idx] = status;
+
       console.log(`Device ${device.ip_address}, Port ${idx}: Status = ${status} (${status === 1 ? 'UP' : 'DOWN'})`);
     });
 
@@ -297,6 +327,10 @@ setInterval(async () => {
     io.emit("traffic", liveTraffic);
   } catch (err) {
     console.error("Polling loop error:", err.message);
+    // New: Send Telegram alert for polling errors
+    if (bot) {
+      bot.sendMessage(chatId, `Error: Polling loop failed - ${err.message}`).catch(err => console.error('Telegram send failed:', err));
+    }
   }
 }, 1000);
 
