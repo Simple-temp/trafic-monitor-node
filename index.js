@@ -46,7 +46,8 @@ const OIDS = {
 /* ================= STATE ================= */
 const lastCounters = {};
 const liveTraffic = {};
-const previousStatuses = {};  // New: Track previous port statuses for change detection
+const previousStatuses = {};  // Track previous port statuses for change detection
+const previousDeviceStatuses = {};  // New: Track previous device statuses for change detection
 
 /* ================= TELEGRAM SETUP ================= */
 const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -104,8 +105,17 @@ async function pollDevice(device) {
   try {
     const pingRes = await ping.promise.probe(device.ip_address, { timeout: 2 });
 
+    const currentDeviceStatus = pingRes.alive ? "UP" : "DOWN";
+
+    // New: Check for device status change and send Telegram alert
+    if (previousDeviceStatuses[device.id] !== undefined && previousDeviceStatuses[device.id] !== currentDeviceStatus && bot) {
+      const alertMessage = `Alert: Device ${device.hostname || device.ip_address} (${device.ip_address}) is now ${currentDeviceStatus}.`;
+      bot.sendMessage(chatId, alertMessage).catch(err => console.error('Telegram send failed:', err));
+    }
+    previousDeviceStatuses[device.id] = currentDeviceStatus;
+
     await db.query("UPDATE devices SET status=? WHERE id=?", [
-      pingRes.alive ? "UP" : "DOWN",
+      currentDeviceStatus,
       device.id,
     ]);
 
@@ -115,12 +125,11 @@ async function pollDevice(device) {
       interfaces.forEach(iface => {
         if (!liveTraffic[device.id]) liveTraffic[device.id] = {};
         liveTraffic[device.id][iface.ifIndex] = { status: 2 }; // DOWN
+        // New: Update previous port statuses to DOWN
+        if (!previousStatuses[device.id]) previousStatuses[device.id] = {};
+        previousStatuses[device.id][iface.ifIndex] = 2;
       });
-      // New: Send Telegram alert for unreachable device
-      if (bot) {
-        const alertMessage = `Alert: Device ${device.hostname || device.ip_address} (${device.ip_address}) is unreachable. All ports set to DOWN.`;
-        bot.sendMessage(chatId, alertMessage).catch(err => console.error('Telegram send failed:', err));
-      }
+      // Alert already sent above for device DOWN
       console.log(`Device ${device.ip_address} unreachable: All ports set to DOWN`);
       return;
     }
@@ -134,7 +143,7 @@ async function pollDevice(device) {
 
     if (!lastCounters[device.id]) lastCounters[device.id] = {};
     if (!liveTraffic[device.id]) liveTraffic[device.id] = {};
-    if (!previousStatuses[device.id]) previousStatuses[device.id] = {};  // New: Init previous statuses
+    if (!previousStatuses[device.id]) previousStatuses[device.id] = {};  // Init previous statuses
 
     // Poll sysName and update hostname
     const sysName = await snmpGet(session, OIDS.sysName);
@@ -293,7 +302,7 @@ async function pollDevice(device) {
       const status = Number(v.value); // 1 = UP, 2 = DOWN
       liveTraffic[device.id][idx] = { ...liveTraffic[device.id][idx], status };
 
-      // New: Check for status change and send Telegram alert
+      // Fixed: Check for status change and send Telegram alert
       const prevStatus = previousStatuses[device.id][idx];
       if (prevStatus !== undefined && prevStatus !== status && bot) {
         const statusText = status === 1 ? 'UP' : 'DOWN';
@@ -301,7 +310,7 @@ async function pollDevice(device) {
         const alertMessage = `Alert: Port ${portName} on Device ${device.hostname || device.ip_address} is now ${statusText}`;
         bot.sendMessage(chatId, alertMessage).catch(err => console.error('Telegram send failed:', err));
       }
-      // New: Update previous status
+      // Update previous status
       previousStatuses[device.id][idx] = status;
 
       console.log(`Device ${device.ip_address}, Port ${idx}: Status = ${status} (${status === 1 ? 'UP' : 'DOWN'})`);
@@ -315,6 +324,9 @@ async function pollDevice(device) {
     interfaces.forEach(iface => {
       if (!liveTraffic[device.id]) liveTraffic[device.id] = {};
       liveTraffic[device.id][iface.ifIndex] = { status: 2 };
+      // New: Update previous port statuses to DOWN
+      if (!previousStatuses[device.id]) previousStatuses[device.id] = {};
+      previousStatuses[device.id][iface.ifIndex] = 2;
     });
   }
 }
