@@ -358,10 +358,10 @@ app.get("/api/devices", async (req, res) => {
 });
 
 app.post("/api/devices", async (req, res) => {
-  const { hostname, ip_address, snmp_version, snmp_community } = req.body;
+  const { hostname, ip_address, snmp_version, snmp_community, options } = req.body;
 
   // Basic validation
-  if (!hostname || !ip_address || !snmp_community) {
+  if (!hostname || !ip_address || !snmp_community || !options) {
     return res.status(400).json({ error: "Hostname, IP address, and SNMP community are required." });
   }
 
@@ -374,8 +374,8 @@ app.post("/api/devices", async (req, res) => {
 
     // Insert new device
     const [result] = await db.query(
-      "INSERT INTO devices (hostname, ip_address, snmp_version, snmp_community) VALUES (?, ?, ?, ?)",
-      [hostname, ip_address, snmp_version || '2c', snmp_community]
+      "INSERT INTO devices (hostname, ip_address, snmp_version, snmp_community, options) VALUES (?, ?, ?, ?, ?)",
+      [hostname, ip_address, snmp_version || '2c', snmp_community, options]
     );
 
     res.status(201).json({ message: "Device added successfully", deviceId: result.insertId });
