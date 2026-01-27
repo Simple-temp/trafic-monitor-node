@@ -27,20 +27,20 @@ const db = mysql.createPool({
 
 /* ================= OIDS ================= */
 const OIDS = {
-  sysName: "1.3.6.1.2.1.1.5.0",
-  ifDescr: "1.3.6.1.2.1.2.2.1.2",
-  ifName: "1.3.6.1.2.1.31.1.1.1.1",
-  ifAlias: "1.3.6.1.2.1.31.1.1.1.18",  // Added for user-set description/alias
-  ifType: "1.3.6.1.2.1.2.2.1.3",
-  ifSpeed: "1.3.6.1.2.1.2.2.1.5",
-  ifAdmin: "1.3.6.1.2.1.2.2.1.7",
-  ifOper: "1.3.6.1.2.1.2.2.1.8",
-  ifIn: "1.3.6.1.2.1.2.2.1.10",
-  ifOut: "1.3.6.1.2.1.2.2.1.16",
-  ifInErrors: "1.3.6.1.2.1.2.2.1.14",
-  ifOutErrors: "1.3.6.1.2.1.2.2.1.20",
-  ifInDiscards: "1.3.6.1.2.1.2.2.1.13",
-  ifOutDiscards: "1.3.6.1.2.1.2.2.1.19",
+  sysName: ["1.3.6.1.2.1.1.5.0", ".1.3.6.1.2.1.1.5.0"],  // Multiple OIDs as array of strings
+  ifDescr: ["1.3.6.1.2.1.2.2.1.2", ".1.3.6.1.2.1.2.2.1.2"],
+  ifName: ["1.3.6.1.2.1.31.1.1.1.1", ".1.3.6.1.2.1.31.1.1.1.1"],
+  ifAlias: ["1.3.6.1.2.1.31.1.1.1.18", ".1.3.6.1.2.1.31.1.1.1.18"],
+  ifOper: ["1.3.6.1.2.1.2.2.1.8", ".1.3.6.1.2.1.2.2.1.8"],
+  ifType: ["1.3.6.1.2.1.2.2.1.3"],
+  ifSpeed: ["1.3.6.1.2.1.2.2.1.5"],
+  ifAdmin: ["1.3.6.1.2.1.2.2.1.7"],
+  ifIn: ["1.3.6.1.2.1.2.2.1.10"],
+  ifOut: ["1.3.6.1.2.1.2.2.1.16"],
+  ifInErrors: ["1.3.6.1.2.1.2.2.1.14"],
+  ifOutErrors: ["1.3.6.1.2.1.2.2.1.20"],
+  ifInDiscards: ["1.3.6.1.2.1.2.2.1.13"],
+  ifOutDiscards: ["1.3.6.1.2.1.2.2.1.19"],
 };
 
 /* ================= STATE ================= */
@@ -60,15 +60,26 @@ if (botToken) {
 }
 
 /* ================= SAFE SNMP GET ================= */
-function snmpGet(session, oid) {
+function snmpGet(session, oids) {
   return new Promise((resolve) => {
-    session.get([oid], (err, varbinds) => {
-      if (err || !varbinds || snmp.isVarbindError(varbinds[0])) {
-        console.warn("SNMP get failed:", oid, err?.message || "No data");
-        return resolve(null);
+    if (!Array.isArray(oids)) oids = [oids];
+    let index = 0;
+    const tryNext = () => {
+      if (index >= oids.length) {
+        resolve(null);
+        return;
       }
-      resolve(varbinds[0].value);
-    });
+      const oid = oids[index];
+      index++;
+      session.get([oid], (err, varbinds) => {
+        if (err || !varbinds || snmp.isVarbindError(varbinds[0])) {
+          tryNext();
+        } else {
+          resolve(varbinds[0].value);
+        }
+      });
+    };
+    tryNext();
   });
 }
 
@@ -188,17 +199,17 @@ async function pollDevice(device) {
       inDiscards,
       outDiscards,
     ] = await Promise.all([
-      snmpWalk(session, OIDS.ifDescr),
-      snmpWalk(session, OIDS.ifName),
-      snmpWalk(session, OIDS.ifAlias),
-      snmpWalk(session, OIDS.ifType),
-      snmpWalk(session, OIDS.ifSpeed),
-      snmpWalk(session, OIDS.ifAdmin),
-      snmpWalk(session, OIDS.ifOper),
-      snmpWalk(session, OIDS.ifInErrors),
-      snmpWalk(session, OIDS.ifOutErrors),
-      snmpWalk(session, OIDS.ifInDiscards),
-      snmpWalk(session, OIDS.ifOutDiscards),
+      snmpWalk(session, OIDS.ifDescr[0]),  // Use first OID for walk
+      snmpWalk(session, OIDS.ifName[0]),
+      snmpWalk(session, OIDS.ifAlias[0]),
+      snmpWalk(session, OIDS.ifType[0]),
+      snmpWalk(session, OIDS.ifSpeed[0]),
+      snmpWalk(session, OIDS.ifAdmin[0]),
+      snmpWalk(session, OIDS.ifOper[0]),
+      snmpWalk(session, OIDS.ifInErrors[0]),
+      snmpWalk(session, OIDS.ifOutErrors[0]),
+      snmpWalk(session, OIDS.ifInDiscards[0]),
+      snmpWalk(session, OIDS.ifOutDiscards[0]),
     ]);
 
     const map = {};
@@ -265,8 +276,8 @@ async function pollDevice(device) {
     }
 
     // Poll traffic counters (unchanged)
-    const ins = await snmpWalk(session, OIDS.ifIn);
-    const outs = await snmpWalk(session, OIDS.ifOut);
+    const ins = await snmpWalk(session, OIDS.ifIn[0]);
+    const outs = await snmpWalk(session, OIDS.ifOut[0]);
 
     ins.forEach((v) => {
       const idx = Number(v.oid.split(".").pop());
@@ -295,7 +306,7 @@ async function pollDevice(device) {
     });
 
     // Poll ifOperStatus for status (1 = UP, 2 = DOWN)
-    const operStatuses = await snmpWalk(session, OIDS.ifOper);
+    const operStatuses = await snmpWalk(session, OIDS.ifOper[0]);
 
     operStatuses.forEach((v) => {
       const idx = Number(v.oid.split(".").pop());
@@ -344,7 +355,7 @@ setInterval(async () => {
       bot.sendMessage(chatId, `Error: Polling loop failed - ${err.message}`).catch(err => console.error('Telegram send failed:', err));
     }
   }
-}, 1000);
+}, 120000);
 
 /* ================= API ================= */
 app.get("/api/devices", async (req, res) => {
@@ -384,6 +395,39 @@ app.post("/api/devices", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+/* ================= UPDATE DEVICE ================= */
+app.put("/api/devices/:id", async (req, res) => {
+  const { id } = req.params;
+  const { hostname, ip_address, snmp_community, options } = req.body;
+
+  try {
+    await db.query(
+      "UPDATE devices SET hostname=?, ip_address=?, snmp_community=?, options=? WHERE id=?",
+      [hostname, ip_address, snmp_community, options, id]
+    );
+    res.json({ message: "Device updated successfully" });
+  } catch (err) {
+    console.error("Update error:", err.message);
+    res.status(500).json({ error: "Failed to update device" });
+  }
+});
+
+/* ================= DELETE DEVICE ================= */
+app.delete("/api/devices/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Note: Due to ON DELETE CASCADE in your SQL, 
+    // this will automatically delete associated interfaces.
+    await db.query("DELETE FROM devices WHERE id = ?", [id]);
+    res.json({ message: "Device deleted successfully" });
+  } catch (err) {
+    console.error("Delete error:", err.message);
+    res.status(500).json({ error: "Failed to delete device" });
+  }
+});
+
+
 
 /* ================= START ================= */
 server.listen(5000, () =>
