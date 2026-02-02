@@ -7,10 +7,18 @@ const { Server } = require("socket.io");
 const ping = require("ping");
 const { config } = require("dotenv");
 const TelegramBot = require('node-telegram-bot-api');  // New: For Telegram
+const dns = require('dns').promises;
 
 config();
 
 const app = express();
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  if (req.method === 'OPTIONS') res.sendStatus(200);
+  else next();
+});
 app.use(cors());
 app.use(express.json());
 
@@ -18,29 +26,31 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
 /* ================= MYSQL ================= */
+
 const db = mysql.createPool({
-  host: "127.0.0.1",
-  user: "root",
-  password: "",
-  database: "nms",
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT,
 });
 
 /* ================= OIDS ================= */
 const OIDS = {
-  sysName: ["1.3.6.1.2.1.1.5.0", ".1.3.6.1.2.1.1.5.0"],  // Multiple OIDs as array of strings
-  ifDescr: ["1.3.6.1.2.1.2.2.1.2", ".1.3.6.1.2.1.2.2.1.2"],
-  ifName: ["1.3.6.1.2.1.31.1.1.1.1", ".1.3.6.1.2.1.31.1.1.1.1"],
-  ifAlias: ["1.3.6.1.2.1.31.1.1.1.18", ".1.3.6.1.2.1.31.1.1.1.18"],
-  ifOper: ["1.3.6.1.2.1.2.2.1.8", ".1.3.6.1.2.1.2.2.1.8"],
-  ifType: ["1.3.6.1.2.1.2.2.1.3"],
-  ifSpeed: ["1.3.6.1.2.1.2.2.1.5"],
-  ifAdmin: ["1.3.6.1.2.1.2.2.1.7"],
-  ifIn: ["1.3.6.1.2.1.2.2.1.10"],
-  ifOut: ["1.3.6.1.2.1.2.2.1.16"],
-  ifInErrors: ["1.3.6.1.2.1.2.2.1.14"],
-  ifOutErrors: ["1.3.6.1.2.1.2.2.1.20"],
-  ifInDiscards: ["1.3.6.1.2.1.2.2.1.13"],
-  ifOutDiscards: ["1.3.6.1.2.1.2.2.1.19"],
+  sysName: "1.3.6.1.2.1.1.5.0",
+  ifDescr: "1.3.6.1.2.1.2.2.1.2",
+  ifName: "1.3.6.1.2.1.31.1.1.1.1",
+  ifAlias: "1.3.6.1.2.1.31.1.1.1.18",  // Added for user-set description/alias
+  ifType: "1.3.6.1.2.1.2.2.1.3",
+  ifSpeed: "1.3.6.1.2.1.2.2.1.5",
+  ifAdmin: "1.3.6.1.2.1.2.2.1.7",
+  ifOper: "1.3.6.1.2.1.2.2.1.8",
+  ifIn: "1.3.6.1.2.1.2.2.1.10",
+  ifOut: "1.3.6.1.2.1.2.2.1.16",
+  ifInErrors: "1.3.6.1.2.1.2.2.1.14",
+  ifOutErrors: "1.3.6.1.2.1.2.2.1.20",
+  ifInDiscards: "1.3.6.1.2.1.2.2.1.13",
+  ifOutDiscards: "1.3.6.1.2.1.2.2.1.19",
 };
 
 /* ================= STATE ================= */
@@ -60,26 +70,15 @@ if (botToken) {
 }
 
 /* ================= SAFE SNMP GET ================= */
-function snmpGet(session, oids) {
+function snmpGet(session, oid) {
   return new Promise((resolve) => {
-    if (!Array.isArray(oids)) oids = [oids];
-    let index = 0;
-    const tryNext = () => {
-      if (index >= oids.length) {
-        resolve(null);
-        return;
+    session.get([oid], (err, varbinds) => {
+      if (err || !varbinds || snmp.isVarbindError(varbinds[0])) {
+        console.warn("SNMP get failed:", oid, err?.message || "No data");
+        return resolve(null);
       }
-      const oid = oids[index];
-      index++;
-      session.get([oid], (err, varbinds) => {
-        if (err || !varbinds || snmp.isVarbindError(varbinds[0])) {
-          tryNext();
-        } else {
-          resolve(varbinds[0].value);
-        }
-      });
-    };
-    tryNext();
+      resolve(varbinds[0].value);
+    });
   });
 }
 
@@ -114,7 +113,7 @@ async function pollDevice(device) {
   const now = Date.now();
 
   try {
-    const pingRes = await ping.promise.probe(device.ip_address, { timeout: 2 });
+    const pingRes = await ping.promise.probe(device.ip_address, { timeout: 15 });
 
     const currentDeviceStatus = pingRes.alive ? "UP" : "DOWN";
 
@@ -199,17 +198,17 @@ async function pollDevice(device) {
       inDiscards,
       outDiscards,
     ] = await Promise.all([
-      snmpWalk(session, OIDS.ifDescr[0]),  // Use first OID for walk
-      snmpWalk(session, OIDS.ifName[0]),
-      snmpWalk(session, OIDS.ifAlias[0]),
-      snmpWalk(session, OIDS.ifType[0]),
-      snmpWalk(session, OIDS.ifSpeed[0]),
-      snmpWalk(session, OIDS.ifAdmin[0]),
-      snmpWalk(session, OIDS.ifOper[0]),
-      snmpWalk(session, OIDS.ifInErrors[0]),
-      snmpWalk(session, OIDS.ifOutErrors[0]),
-      snmpWalk(session, OIDS.ifInDiscards[0]),
-      snmpWalk(session, OIDS.ifOutDiscards[0]),
+      snmpWalk(session, OIDS.ifDescr),
+      snmpWalk(session, OIDS.ifName),
+      snmpWalk(session, OIDS.ifAlias),
+      snmpWalk(session, OIDS.ifType),
+      snmpWalk(session, OIDS.ifSpeed),
+      snmpWalk(session, OIDS.ifAdmin),
+      snmpWalk(session, OIDS.ifOper),
+      snmpWalk(session, OIDS.ifInErrors),
+      snmpWalk(session, OIDS.ifOutErrors),
+      snmpWalk(session, OIDS.ifInDiscards),
+      snmpWalk(session, OIDS.ifOutDiscards),
     ]);
 
     const map = {};
@@ -276,8 +275,8 @@ async function pollDevice(device) {
     }
 
     // Poll traffic counters (unchanged)
-    const ins = await snmpWalk(session, OIDS.ifIn[0]);
-    const outs = await snmpWalk(session, OIDS.ifOut[0]);
+    const ins = await snmpWalk(session, OIDS.ifIn);
+    const outs = await snmpWalk(session, OIDS.ifOut);
 
     ins.forEach((v) => {
       const idx = Number(v.oid.split(".").pop());
@@ -306,7 +305,7 @@ async function pollDevice(device) {
     });
 
     // Poll ifOperStatus for status (1 = UP, 2 = DOWN)
-    const operStatuses = await snmpWalk(session, OIDS.ifOper[0]);
+    const operStatuses = await snmpWalk(session, OIDS.ifOper);
 
     operStatuses.forEach((v) => {
       const idx = Number(v.oid.split(".").pop());
@@ -355,7 +354,7 @@ setInterval(async () => {
       bot.sendMessage(chatId, `Error: Polling loop failed - ${err.message}`).catch(err => console.error('Telegram send failed:', err));
     }
   }
-}, 120000);
+}, 60000);
 
 /* ================= API ================= */
 app.get("/api/devices", async (req, res) => {
@@ -428,8 +427,34 @@ app.delete("/api/devices/:id", async (req, res) => {
 });
 
 
+app.get('/api/ping', async (req, res) => {
+  const { host } = req.query;
+
+  // Validation: If host is missing or literally the string "undefined"
+  if (!host || host === 'undefined') {
+    return res.status(400).json({ error: "Host parameter is required" });
+  }
+
+  try {
+    const lookup = await dns.lookup(host);
+    const ip = lookup.address;
+
+    const result = await ping.promise.probe(ip, { timeout: 2 });
+
+    res.json({
+      host: host,
+      ip: ip,
+      latency: result.alive ? Math.round(result.time) : "Timeout",
+      status: result.alive ? "online" : "offline"
+    });
+  } catch (error) {
+    console.error(`Error pinging ${host}:`, error.message);
+    res.status(500).json({ error: "Failed to resolve or ping host", details: error.message });
+  }
+});
 
 /* ================= START ================= */
-server.listen(5000, () =>
-  console.log("Backend running on http://localhost:5000")
-);
+const port = process.env.PORT || 5000;
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Server running on port ${port}`);
+});
