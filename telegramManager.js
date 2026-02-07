@@ -1,4 +1,6 @@
 // telegramManager.js
+//curl https://api.telegram.org/bot8363987157:AAEun4yptxoXVcOHXky1vYxApahaca65sNc/getUpdates
+
 const TelegramBot = require('node-telegram-bot-api');
 
 const zoneBots = {
@@ -79,7 +81,7 @@ const sendAlert = async (deviceIp, message, interfaceName = null) => {
 module.exports = { sendAlert };
 
 // Temporary test - remove after testing
-(async () => {
-    console.log('Testing manual send...');
-    await sendAlert("172.31.252.25", "Manual test alert from bot!");
-})();
+//(async () => {
+    //console.log('Testing manual send...');
+    //await sendAlert("172.31.252.12", "Manual test alert from bot!");
+//})();

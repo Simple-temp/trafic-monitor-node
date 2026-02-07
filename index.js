@@ -8,6 +8,7 @@ const ping = require("ping");
 const { config } = require("dotenv");
 const TelegramBot = require('node-telegram-bot-api');  // New: For Telegram
 const dns = require('dns').promises;
+const telegramManager = require('./telegramManager');
 
 config();
 
@@ -113,11 +114,11 @@ async function pollDevice(device) {
   const now = Date.now();
 
   try {
-    const pingRes = await ping.promise.probe(device.ip_address, { timeout: 15 });
+    const pingRes = await ping.promise.probe(device.ip_address, { timeout: 30 });
 
     const currentDeviceStatus = pingRes.alive ? "UP" : "DOWN";
 
-    // New: Check for device status change and send Telegram alert
+    // Fixed: Check for device status change and send Telegram alert (corrected typo: !==  -> !== undefined)
     if (previousDeviceStatuses[device.id] !== undefined && previousDeviceStatuses[device.id] !== currentDeviceStatus && bot) {
       const alertMessage = `Alert: Device ${device.hostname || device.ip_address} (${device.ip_address}) is now ${currentDeviceStatus}.`;
       bot.sendMessage(chatId, alertMessage).catch(err => console.error('Telegram send failed:', err));
@@ -184,7 +185,7 @@ async function pollDevice(device) {
       console.warn(`No CPU OID worked for ${device.ip_address}`);
     }
 
-    // Poll interface data (added ifAlias)
+    // Poll interface data (added ifAlias, ifInOctets, ifOutOctets)
     const [
       descrs,
       names,
@@ -197,6 +198,8 @@ async function pollDevice(device) {
       outErrors,
       inDiscards,
       outDiscards,
+      inOctets,  // New: Poll raw inbound octets
+      outOctets, // New: Poll raw outbound octets
     ] = await Promise.all([
       snmpWalk(session, OIDS.ifDescr),
       snmpWalk(session, OIDS.ifName),
@@ -209,6 +212,8 @@ async function pollDevice(device) {
       snmpWalk(session, OIDS.ifOutErrors),
       snmpWalk(session, OIDS.ifInDiscards),
       snmpWalk(session, OIDS.ifOutDiscards),
+      snmpWalk(session, OIDS.ifIn),  // New: Poll ifInOctets
+      snmpWalk(session, OIDS.ifOut), // New: Poll ifOutOctets
     ]);
 
     const map = {};
@@ -230,14 +235,16 @@ async function pollDevice(device) {
     add(outErrors, "ifOutErrors");
     add(inDiscards, "ifInDiscards");
     add(outDiscards, "ifOutDiscards");
+    add(inOctets, "ifInOctets");  // New: Add to map
+    add(outOctets, "ifOutOctets"); // New: Add to map
 
     for (const ifIndex in map) {
       const i = map[ifIndex];
 
       await db.query(
         `INSERT INTO interfaces
-        (device_id, ifIndex, ifDescr, ifName, ifAlias, ifType, ifSpeed, ifAdminStatus, ifOperStatus, ifInErrors, ifOutErrors, ifInDiscards, ifOutDiscards, last_polled)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
+        (device_id, ifIndex, ifDescr, ifName, ifAlias, ifType, ifSpeed, ifAdminStatus, ifOperStatus, ifInErrors, ifOutErrors, ifInDiscards, ifOutDiscards, ifInOctets, ifOutOctets, last_polled)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())
         ON DUPLICATE KEY UPDATE
         ifDescr=VALUES(ifDescr),
         ifName=VALUES(ifName),
@@ -250,6 +257,8 @@ async function pollDevice(device) {
         ifOutErrors=VALUES(ifOutErrors),
         ifInDiscards=VALUES(ifInDiscards),
         ifOutDiscards=VALUES(ifOutDiscards),
+        ifInOctets=VALUES(ifInOctets),
+        ifOutOctets=VALUES(ifOutOctets),
         last_polled=NOW()`,
         [
           device.id,
@@ -265,6 +274,8 @@ async function pollDevice(device) {
           i.ifOutErrors || 0,
           i.ifInDiscards || 0,
           i.ifOutDiscards || 0,
+          i.ifInOctets || 0,  // New: Store raw inbound octets
+          i.ifOutOctets || 0, // New: Store raw outbound octets
         ]
       );
 
@@ -274,7 +285,7 @@ async function pollDevice(device) {
       }
     }
 
-    // Poll traffic counters (unchanged)
+    // Poll traffic counters (unchanged - for rate calculation)
     const ins = await snmpWalk(session, OIDS.ifIn);
     const outs = await snmpWalk(session, OIDS.ifOut);
 
@@ -342,7 +353,10 @@ async function pollDevice(device) {
 }
 
 /* ================= POLL LOOP ================= */
+let polling = false;  // Flag to prevent overlapping polls
 setInterval(async () => {
+  //if (polling) return;  // Skip if previous poll is still running
+  //polling = true;
   try {
     const [devices] = await db.query("SELECT * FROM devices");
     for (const d of devices) await pollDevice(d);
@@ -354,6 +368,7 @@ setInterval(async () => {
       bot.sendMessage(chatId, `Error: Polling loop failed - ${err.message}`).catch(err => console.error('Telegram send failed:', err));
     }
   }
+  //polling = false;
 }, 60000);
 
 /* ================= API ================= */
@@ -453,8 +468,140 @@ app.get('/api/ping', async (req, res) => {
   }
 });
 
+
+/* ================= API ROUTES ================= */
+
+// Add these routes for interfacesnotinuse
+app.get('/api/interfacesnotinuse', async (req, res) => {
+  const query = `
+    SELECT i.*, d.hostname AS device_name
+    FROM interfacesnotinuse i
+    LEFT JOIN devices d ON i.device_id = d.id
+  `;
+  try {
+    const [results] = await db.query(query);
+    console.log('Fetched interfacesnotinuse results:', results); // Debug log
+    res.json(results);
+  } catch (err) {
+    console.error('Error fetching interfacesnotinuse:', err);
+    res.status(500).json({ error: 'Failed to fetch', details: err.message });
+  }
+});
+
+// POST /api/interfacesnotinuse - Insert an interface into not-in-use table
+app.post('/api/interfacesnotinuse', (req, res) => {
+  const { device_id, ifIndex, ifDescr, ifName, ifAlias, ifOperStatus } = req.body;
+  const query = `INSERT INTO interfacesnotinuse (device_id, ifIndex, ifDescr, ifName, ifAlias, ifOperStatus) VALUES (?, ?, ?, ?, ?, ?)`;
+  db.query(query, [device_id, ifIndex, ifDescr, ifName, ifAlias, ifOperStatus], (err, result) => {
+    if (err) {
+      console.error('Error inserting into interfacesnotinuse:', err);
+      return res.status(500).json({ error: 'Failed to insert' });
+    }
+    res.status(201).json({ message: 'Inserted successfully', id: result.insertId });
+  });
+});
+
+// DELETE /api/interfacesnotinuse/:id - Delete by id
+app.delete('/api/interfacesnotinuse/:id', (req, res) => {
+  const { id } = req.params;
+  const query = `DELETE FROM interfacesnotinuse WHERE id = ?`;
+  db.query(query, [id], (err, result) => {
+    if (err) {
+      console.error('Error deleting from interfacesnotinuse:', err);
+      return res.status(500).json({ error: 'Failed to delete' });
+    }
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    res.json({ message: 'Deleted successfully' });
+  });
+});
+
+// ... (rest of your app code)
+
+// GET /api/pingtable - Fetch all data, grouped by category
+app.get('/api/pingtable', async (req, res) => {
+  try {
+    const query = 'SELECT * FROM pingtable';
+    const [results] = await db.query(query); // Use await for promise-based query
+
+    // Group by category
+    const tabData = {};
+    const latencyGroups = {};
+    results.forEach(row => {
+      if (!tabData[row.category]) tabData[row.category] = [];
+      tabData[row.category].push(row.name);
+
+      latencyGroups[row.name] = {
+        best: [row.best_low, row.best_high],
+        someHigh: [row.somehigh_low, row.somehigh_high],
+        veryHigh: [row.veryhigh_low, row.veryhigh_high]
+      };
+    });
+
+    res.json({ tabData, latencyGroups });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/pingtable - Add new entry
+app.post('/api/pingtable', async (req, res) => {
+  try {
+    const { name, best_low, best_high, somehigh_low, somehigh_high, veryhigh_low, veryhigh_high, category } = req.body;
+    const query = 'INSERT INTO pingtable (name, best_low, best_high, somehigh_low, somehigh_high, veryhigh_low, veryhigh_high, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?)';
+    await db.query(query, [name, best_low, best_high, somehigh_low, somehigh_high, veryhigh_low, veryhigh_high, category]); // Use await
+    res.json({ message: 'Added successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/pingtable/:name - Update an entry
+app.put('/api/pingtable/:name', async (req, res) => {
+  try {
+    const { name } = req.params;
+    const { best_low, best_high, somehigh_low, somehigh_high, veryhigh_low, veryhigh_high, category } = req.body;
+    const query = 'UPDATE pingtable SET best_low=?, best_high=?, somehigh_low=?, somehigh_high=?, veryhigh_low=?, veryhigh_high=?, category=? WHERE name=?';
+    await db.query(query, [best_low, best_high, somehigh_low, somehigh_high, veryhigh_low, veryhigh_high, category, name]);
+    res.json({ message: 'Updated successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/pingtable/:name - Delete an entry
+app.delete('/api/pingtable/:name', async (req, res) => {
+  try {
+    const { name } = req.params;
+    const query = 'DELETE FROM pingtable WHERE name=?';
+    await db.query(query, [name]);
+    res.json({ message: 'Deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/ping?host=name - Ping and get latency/IP
+app.get('/api/ping', async (req, res) => {
+  const host = req.query.host;
+  try {
+    const pingRes = await ping.promise.probe(host);
+    const latency = pingRes.time !== 'unknown' ? parseFloat(pingRes.time) : null;
+
+    dns.lookup(host, (err, address) => {
+      const ip = err ? 'N/A' : address;
+      res.json({ latency, ip });
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Ping failed' });
+  }
+});
+
+
+
 /* ================= START ================= */
 const port = process.env.PORT || 5000;
-app.listen(port, '0.0.0.0', () => {
+server.listen(port, '0.0.0.0', () => {
   console.log(`Server running on port ${port}`);
 });
