@@ -122,28 +122,83 @@ async function pollDevice(device) {
   const now = Date.now();
 
   try {
-    const pingRes = await ping.promise.probe(device.ip_address, { timeout: 15 });
+    // const pingRes = await ping.promise.probe(device.ip_address, { timeout: 15 });
 
-    const currentDeviceStatus = pingRes.alive ? "UP" : "DOWN";
+    // const currentDeviceStatus = pingRes.alive ? "UP" : "DOWN";
 
-    await db.query("UPDATE devices SET status=? WHERE id=?", [
-      currentDeviceStatus,
-      device.id,
+    // await db.query("UPDATE devices SET status=? WHERE id=?", [
+    //   currentDeviceStatus,
+    //   device.id,
+    // ]);
+
+    // if (!pingRes.alive) {
+    //   // Device unreachable: Set all stored ports to DOWN (2)
+    //   const [interfaces] = await db.query("SELECT ifIndex FROM interfaces WHERE device_id = ?", [device.id]);
+    //   interfaces.forEach(iface => {
+    //     if (!liveTraffic[device.id]) liveTraffic[device.id] = {};
+    //     liveTraffic[device.id][iface.ifIndex] = { status: 2 }; // DOWN
+    //     // New: Update previous port statuses to DOWN
+    //     if (!previousStatuses[device.id]) previousStatuses[device.id] = {};
+    //     previousStatuses[device.id][iface.ifIndex] = 2;
+    //   });
+    //   // Alert already sent above for device DOWN
+    //   console.log(`Device ${device.ip_address} unreachable: All stored ports set to DOWN`);
+    //   return;
+    // }
+
+    // 1. Perform the ping
+    const pingRes = await ping.promise.probe(device.ip_address, { timeout: 1 });
+
+    // 2. Fetch the current status and counter from the DB
+    const [[dbDevice]] = await db.query("SELECT status, fail_count FROM devices WHERE id = ?", [device.id]);
+    let { status: lastStatus, fail_count: currentCount } = dbDevice;
+
+    let newStatus = lastStatus;
+    let newCount = currentCount;
+
+    if (pingRes.alive) {
+      // PING SUCCESS
+      if (lastStatus === "DOWN") {
+        newCount++; // Increment success count toward becoming UP
+        if (newCount >= 2) {
+          newStatus = "UP";
+          newCount = 0; // Reset
+        }
+      } else {
+        newCount = 0; // Already UP, keep counter at 0
+      }
+    } else {
+      // PING FAILURE (Timeout or Unreachable)
+      if (lastStatus === "UP") {
+        newCount++; // Increment failure count toward becoming DOWN
+        if (newCount >= 2) {
+          newStatus = "DOWN";
+          newCount = 0; // Reset
+        }
+      } else {
+        newCount = 0; // Already DOWN, keep counter at 0
+      }
+    }
+
+    // 3. Update the device record
+    await db.query("UPDATE devices SET status = ?, fail_count = ?, last_polled = NOW() WHERE id = ?", [
+      newStatus,
+      newCount,
+      device.id
     ]);
 
-    if (!pingRes.alive) {
-      // Device unreachable: Set all stored ports to DOWN (2)
+    // 4. If status finally flipped to DOWN, handle interface updates
+    if (newStatus === "DOWN" && lastStatus === "UP") {
+      console.log(`Device ${device.ip_address} is now officially DOWN after 30 failures.`);
+
       const [interfaces] = await db.query("SELECT ifIndex FROM interfaces WHERE device_id = ?", [device.id]);
       interfaces.forEach(iface => {
         if (!liveTraffic[device.id]) liveTraffic[device.id] = {};
         liveTraffic[device.id][iface.ifIndex] = { status: 2 }; // DOWN
-        // New: Update previous port statuses to DOWN
+
         if (!previousStatuses[device.id]) previousStatuses[device.id] = {};
         previousStatuses[device.id][iface.ifIndex] = 2;
       });
-      // Alert already sent above for device DOWN
-      console.log(`Device ${device.ip_address} unreachable: All stored ports set to DOWN`);
-      return;
     }
 
     // Device reachable: Poll interfaces
@@ -384,73 +439,73 @@ async function pollDevice(device) {
     // Telegram SETUP END
 
 
-// Poll IP addresses to map IPs to ifIndex (for BGP local addr association)
-const ipAddrs = await snmpWalk(session, OIDS.ipAdEntAddr);
-const ipIfIndices = await snmpWalk(session, OIDS.ipAdEntIfIndex);
-const ipToIfIndex = {};
-ipAddrs.forEach((v, i) => {
-  const ip = v.value.toString();
-  const ifIndex = Number(ipIfIndices[i]?.value) || 0;
-  ipToIfIndex[ip] = ifIndex;
-  console.log(`IP Mapping: ${ip} -> ifIndex ${ifIndex}`);  // Debug log
-});
+    // Poll IP addresses to map IPs to ifIndex (for BGP local addr association)
+    const ipAddrs = await snmpWalk(session, OIDS.ipAdEntAddr);
+    const ipIfIndices = await snmpWalk(session, OIDS.ipAdEntIfIndex);
+    const ipToIfIndex = {};
+    ipAddrs.forEach((v, i) => {
+      const ip = v.value.toString();
+      const ifIndex = Number(ipIfIndices[i]?.value) || 0;
+      ipToIfIndex[ip] = ifIndex;
+      console.log(`IP Mapping: ${ip} -> ifIndex ${ifIndex}`);  // Debug log
+    });
 
-// Log ifMap for debugging
-console.log('ifMap keys:', Object.keys(ifMap));  // Check if interfaces are loaded
+    // Log ifMap for debugging
+    console.log('ifMap keys:', Object.keys(ifMap));  // Check if interfaces are loaded
 
-// Poll BGP peers separately
-try {
-  const [
-    bgpStates,
-    bgpAddrs,
-    bgpAsns,
-    bgpTimes,
-    bgpLocalAddrs
-  ] = await Promise.all([
-    snmpWalk(session, OIDS.bgpPeerState),
-    snmpWalk(session, OIDS.bgpPeerRemoteAddr),
-    snmpWalk(session, OIDS.bgpPeerRemoteAs),
-    snmpWalk(session, OIDS.bgpPeerFsmEstablishedTime),
-    snmpWalk(session, OIDS.bgpPeerLocalAddr)
-  ]);
+    // Poll BGP peers separately
+    try {
+      const [
+        bgpStates,
+        bgpAddrs,
+        bgpAsns,
+        bgpTimes,
+        bgpLocalAddrs
+      ] = await Promise.all([
+        snmpWalk(session, OIDS.bgpPeerState),
+        snmpWalk(session, OIDS.bgpPeerRemoteAddr),
+        snmpWalk(session, OIDS.bgpPeerRemoteAs),
+        snmpWalk(session, OIDS.bgpPeerFsmEstablishedTime),
+        snmpWalk(session, OIDS.bgpPeerLocalAddr)
+      ]);
 
-  if (bgpStates.length > 0) {
-    console.log(`Found ${bgpStates.length} BGP peers for ${device.ip_address}`);
-    const bgpMap = {};
-    const bgpAdd = (arr, key) =>
-      arr.forEach((v) => {
-        const idx = Number(v.oid.split(".").pop());
-        bgpMap[idx] = bgpMap[idx] || {};
-        bgpMap[idx][key] = v.value;
-      });
+      if (bgpStates.length > 0) {
+        console.log(`Found ${bgpStates.length} BGP peers for ${device.ip_address}`);
+        const bgpMap = {};
+        const bgpAdd = (arr, key) =>
+          arr.forEach((v) => {
+            const idx = Number(v.oid.split(".").pop());
+            bgpMap[idx] = bgpMap[idx] || {};
+            bgpMap[idx][key] = v.value;
+          });
 
-    bgpAdd(bgpStates, "bgpPeerState");
-    bgpAdd(bgpAddrs, "bgpPeerRemoteAddr");
-    bgpAdd(bgpAsns, "bgpPeerRemoteAs");
-    bgpAdd(bgpTimes, "bgpPeerFsmEstablishedTime");
-    bgpAdd(bgpLocalAddrs, "bgpPeerLocalAddr");
+        bgpAdd(bgpStates, "bgpPeerState");
+        bgpAdd(bgpAddrs, "bgpPeerRemoteAddr");
+        bgpAdd(bgpAsns, "bgpPeerRemoteAs");
+        bgpAdd(bgpTimes, "bgpPeerFsmEstablishedTime");
+        bgpAdd(bgpLocalAddrs, "bgpPeerLocalAddr");
 
-    // Insert/update BGP peers (assuming 'bgp_peers' table exists with new columns)
-    for (const peerIndex in bgpMap) {
-      const peer = bgpMap[peerIndex];
-      const localAddr = peer.bgpPeerLocalAddr?.toString() || "";
-      const ifIndex = ipToIfIndex[localAddr] || 0;
-      const interfaceName = ifMap[ifIndex]?.name?.toString() || "";
-      const interfaceAlias = ifMap[ifIndex]?.alias?.toString() || "";
+        // Insert/update BGP peers (assuming 'bgp_peers' table exists with new columns)
+        for (const peerIndex in bgpMap) {
+          const peer = bgpMap[peerIndex];
+          const localAddr = peer.bgpPeerLocalAddr?.toString() || "";
+          const ifIndex = ipToIfIndex[localAddr] || 0;
+          const interfaceName = ifMap[ifIndex]?.name?.toString() || "";
+          const interfaceAlias = ifMap[ifIndex]?.alias?.toString() || "";
 
-      console.log(`BGP Peer ${peerIndex}: localAddr=${localAddr}, ifIndex=${ifIndex}, interfaceName=${interfaceName}, interfaceAlias=${interfaceAlias}`);  // Debug log
+          console.log(`BGP Peer ${peerIndex}: localAddr=${localAddr}, ifIndex=${ifIndex}, interfaceName=${interfaceName}, interfaceAlias=${interfaceAlias}`);  // Debug log
 
-      // If mapping fails, try alternative: assume peerIndex == ifIndex (unreliable, but common on some devices)
-      let altInterfaceName = interfaceName;
-      let altInterfaceAlias = interfaceAlias;
-      if (!interfaceName && ifMap[peerIndex]) {
-        altInterfaceName = ifMap[peerIndex]?.name?.toString() || "";
-        altInterfaceAlias = ifMap[peerIndex]?.alias?.toString() || "";
-        console.log(`Using alternative mapping for Peer ${peerIndex}: interfaceName=${altInterfaceName}, interfaceAlias=${altInterfaceAlias}`);
-      }
+          // If mapping fails, try alternative: assume peerIndex == ifIndex (unreliable, but common on some devices)
+          let altInterfaceName = interfaceName;
+          let altInterfaceAlias = interfaceAlias;
+          if (!interfaceName && ifMap[peerIndex]) {
+            altInterfaceName = ifMap[peerIndex]?.name?.toString() || "";
+            altInterfaceAlias = ifMap[peerIndex]?.alias?.toString() || "";
+            console.log(`Using alternative mapping for Peer ${peerIndex}: interfaceName=${altInterfaceName}, interfaceAlias=${altInterfaceAlias}`);
+          }
 
-      await db.query(
-        `INSERT INTO bgp_peers
+          await db.query(
+            `INSERT INTO bgp_peers
         (device_id, peer_index, bgpPeerState, bgpPeerRemoteAddr, bgpPeerRemoteAs, bgpPeerFsmEstablishedTime, interface_name, interface_alias, last_polled)
         VALUES (?,?,?,?,?,?,?,?,NOW())
         ON DUPLICATE KEY UPDATE
@@ -461,24 +516,24 @@ try {
         interface_name=VALUES(interface_name),
         interface_alias=VALUES(interface_alias),
         last_polled=NOW()`,
-        [
-          device.id,
-          peerIndex,
-          peer.bgpPeerState || 0,
-          peer.bgpPeerRemoteAddr?.toString() || "",
-          peer.bgpPeerRemoteAs || 0,
-          peer.bgpPeerFsmEstablishedTime || 0,
-          altInterfaceName || interfaceName,  // Use alternative if primary fails
-          altInterfaceAlias || interfaceAlias
-        ]
-      );
+            [
+              device.id,
+              peerIndex,
+              peer.bgpPeerState || 0,
+              peer.bgpPeerRemoteAddr?.toString() || "",
+              peer.bgpPeerRemoteAs || 0,
+              peer.bgpPeerFsmEstablishedTime || 0,
+              altInterfaceName || interfaceName,  // Use alternative if primary fails
+              altInterfaceAlias || interfaceAlias
+            ]
+          );
+        }
+      } else {
+        console.log(`No BGP peers found for ${device.ip_address}`);
+      }
+    } catch (bgpErr) {
+      console.warn(`BGP polling failed for ${device.ip_address}: ${bgpErr.message}`);
     }
-  } else {
-    console.log(`No BGP peers found for ${device.ip_address}`);
-  }
-} catch (bgpErr) {
-  console.warn(`BGP polling failed for ${device.ip_address}: ${bgpErr.message}`);
-}
 
 
     session.close();
@@ -509,7 +564,7 @@ setInterval(async () => {
       bot.sendMessage(chatId, `Error: Polling loop failed - ${err.message}`).catch(err => console.error('Telegram send failed:', err));
     }
   }
-}, 90000);
+}, 120000);
 
 /* ================= API ================= */
 app.get("/api/devices", async (req, res) => {
@@ -789,6 +844,41 @@ app.get('/api/bgppeers', async (req, res) => {
       details: err.message
     });
   }
+});
+
+//==========================Port Logs=============================
+
+// GET: Fetch all logs (Ordered by newest first)
+app.get('/api/port-logs', async (req, res) => {
+  try {
+    const [rows] = await db.query("SELECT * FROM port_logs ORDER BY created_at DESC LIMIT 500");
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST: Save a new log entry
+app.post('/api/port-logs', async (req, res) => {
+  const { device, alias, from, to } = req.body;
+  try {
+    await db.query(
+      "INSERT INTO port_logs (device_name, if_alias, status_from, status_to) VALUES (?, ?, ?, ?)",
+      [device, alias, from, to]
+    );
+    res.status(201).json({ message: "Log saved" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. DELETE - Clear specific log
+app.delete('/api/port-logs/:id', (req, res) => {
+  const sql = "DELETE FROM port_logs WHERE id = ?";
+  db.query(sql, [req.params.id], (err, result) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ message: "Log deleted" });
+  });
 });
 
 /* ================= START ================= */
