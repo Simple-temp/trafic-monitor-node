@@ -37,9 +37,27 @@ const zoneBots = {
         "172.16.114.4", "172.16.114.5", "172.16.114.6", "172.16.114.7", 
         "172.16.114.8", "172.16.114.9", "172.16.100.2", "172.16.113.252", 
         "172.16.100.54", "172.16.111.102", "172.16.111.3", "192.168.176.1", 
-        "172.31.252.5"
+        "172.31.252.5",
     ]
    },
+    "CTG-Bot": {
+        token: process.env.TELEGRAM_BOT_TOKEN_CTG,
+        chatId: process.env.TELEGRAM_CHAT_ID_CTG,
+        ips: [
+        "172.16.115.132",
+        "172.16.115.30",
+        "172.16.115.70",
+        "172.29.100.2",
+        "172.29.100.202",
+        "172.29.100.34",
+        "172.29.100.38",
+        "172.29.100.42",
+        "172.29.100.50",
+        "172.29.100.54",
+        "172.31.252.30",
+        "172.31.252.16",
+        ]
+    },
 };
 
 // Regex patterns for allowed prefixes (case-insensitive)
@@ -129,5 +147,5 @@ module.exports = { sendAlert };
 // Temporary test - remove after testing
 (async () => {
     //console.log('Testing Message...');
-    await sendAlert("10.11.120.8", "Testing Message...!");
+    //await sendAlert("10.11.120.8", "Testing Message...!");
 })();

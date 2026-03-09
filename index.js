@@ -9,6 +9,7 @@ const { config } = require("dotenv");
 const TelegramBot = require('node-telegram-bot-api');  // New: For Telegram
 const dns = require('dns').promises;
 const { sendAlert } = require("./telegramManager");
+const dgram = require("dgram");
 
 config();
 
@@ -117,6 +118,97 @@ function snmpWalk(session, oid) {
   });
 }
 
+/* ==================================================================Sflow Start Here========================================= */
+
+
+/* ================= GLOBAL SFLOW COLLECTOR ================= */
+
+const sflowServer = dgram.createSocket("udp4");
+
+
+
+const WELL_KNOWN_PORTS = {
+
+  21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
+
+  80: "HTTP", 110: "POP3", 443: "HTTPS", 3389: "RDP", 5060: "SIP", 8080: "Proxy"
+
+};
+
+
+
+sflowServer.on("message", (msg, rinfo) => {
+
+  try {
+
+    if (msg.readUInt32BE(0) !== 5) return; // Must be sFlow v5
+
+
+
+    const agentIp = rinfo.address; // The Switch IP (10.11.120.8)
+
+    const ethTypePos = msg.indexOf(Buffer.from([0x08, 0x00]));
+
+    
+
+    if (ethTypePos !== -1) {
+
+      const ipStart = ethTypePos + 2;
+
+
+
+      const srcIp = `${msg[ipStart + 12]}.${msg[ipStart + 13]}.${msg[ipStart + 14]}.${msg[ipStart + 15]}`;
+
+      const dstIp = `${msg[ipStart + 16]}.${msg[ipStart + 17]}.${msg[ipStart + 18]}.${msg[ipStart + 19]}`;
+
+      
+
+      const transportStart = ipStart + 20;
+
+      const sPort = msg.readUInt16BE(transportStart);
+
+      const dPort = msg.readUInt16BE(transportStart + 2);
+
+
+
+      const flowData = {
+
+        agentIp,        // Switch IP
+
+        serverIp: "172.17.0.50", // Your NMS IP
+
+        srcIp,
+
+        dstIp,
+
+        sPort,
+
+        dPort,
+
+        service: WELL_KNOWN_PORTS[dPort] || dPort.toString(),
+
+        timestamp: new Date().toLocaleTimeString()
+
+      };
+
+
+
+      io.emit("sflow_packet", flowData);
+
+    }
+
+  } catch (err) {
+
+    // Binary parsing error
+
+  }
+
+});
+
+sflowServer.bind(6343, "0.0.0.0");
+
+
+/* ===================================================================Sflow Ends Here======================================== */
 
 
 /* ================= POLL DEVICE ================= */
@@ -864,7 +956,7 @@ app.get('/api/bgppeers', async (req, res) => {
 // GET: Fetch all logs (Ordered by newest first)
 app.get('/api/port-logs', async (req, res) => {
   try {
-    const [rows] = await db.query("SELECT * FROM port_logs ORDER BY created_at DESC LIMIT 500");
+    const [rows] = await db.query("SELECT * FROM port_logs ORDER BY created_at DESC LIMIT 2500");
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -895,7 +987,7 @@ app.delete('/api/port-logs/:id', (req, res) => {
   });
 });
 
-// API Routes for bgp alert system =======================================
+// API Routes for bgp alert=========================================================
 app.get('/api/bgpnotinuse', async (req, res) => {
   try {
     const [rows] = await db.query('SELECT * FROM bgpnotinuse ORDER BY created_at DESC');
@@ -935,9 +1027,44 @@ app.delete('/api/bgpnotinuse/:id', async (req, res) => {
   }
 });
 
+app.post('/api/bgpstatelog', async (req, res) => {
+  try {
+    const { 
+      device_id, 
+      device_name, 
+      device_ip, 
+      remote_ip, 
+      remote_as, 
+      previous_state, 
+      new_state, 
+      state_change 
+    } = req.body;
+    
+    const [result] = await db.query(
+      `INSERT INTO bgpstatelog 
+       (device_id, device_name, device_ip, remote_ip, remote_as, previous_state, new_state, state_change) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [device_id, device_name, device_ip, remote_ip, remote_as, previous_state, new_state, state_change]
+    );
+    
+    res.json({ 
+      success: true, 
+      id: result.insertId,
+      message: 'Log saved successfully' 
+    });
+  } catch (err) {
+    console.error('Error inserting bgpstatelog:', err);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to insert log',
+      details: err.message 
+    });
+  }
+});
+
 app.get('/api/bgpstatelog', async (req, res) => {
   try {
-    const { limit = 100 } = req.query;
+    const { limit = 50000 } = req.query;
     const [rows] = await db.query(`SELECT * FROM bgpstatelog ORDER BY created_at DESC LIMIT ?`, [limit]);
     res.json({ success: true, data: rows, count: rows.length });
   } catch (err) {
